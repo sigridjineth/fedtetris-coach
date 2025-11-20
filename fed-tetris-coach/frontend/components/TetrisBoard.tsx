@@ -170,7 +170,7 @@ const Tetris = () => {
   const updatePlayerPos = ({ x, y, collided }: { x: number, y: number, collided: boolean }) => {
     setPlayer(prev => ({
       ...prev,
-      pos: { x: (prev.pos.x += x), y: (prev.pos.y += y) },
+      pos: { x: prev.pos.x + x, y: prev.pos.y + y },
       collided,
     }));
   };
@@ -223,88 +223,13 @@ const Tetris = () => {
      }, []);
   };
   
-  // AI Coach Polling with Robustness
-  useEffect(() => {
-    if (!gameOver && !player.collided) {
-        const controller = new AbortController();
-        let alive = true;
-
-        const getAdvice = async () => {
-            if (!alive) return;
-            
-            setLoadingAdvice(true);
-            // Full state for AI - Use dependencies properly
-            const stateSummary = {
-                board: stage.map(row => row.map(cell => cell[0])),
-                currentPiece: player.tetromino,
-                currentPos: player.pos,
-                level,
-                score
-            };
-            
-            // Log state for replay
-            replayLog.current.push({
-                state: stateSummary,
-                timestamp: Date.now()
-            });
-
-            try {
-                const newAdvice = await fetchCoachAdvice(
-                    stateSummary, 
-                    { level: 'intermediate' }, 
-                    address,
-                    { signal: controller.signal, timeoutMs: 5000 } // 5s timeout
-                );
-                if (alive) {
-                    setAdvice(newAdvice);
-                }
-            } catch (err) {
-                // handled in api.ts or ignored
-            } finally {
-                if (alive) setLoadingAdvice(false);
-            }
-        };
-        
-        // Debounce or throttle this in real app
-        const timeoutId = setTimeout(() => {
-            getAdvice();
-        }, 3000); // Coach every 3s
-
-        return () => {
-            alive = false;
-            controller.abort();
-            clearTimeout(timeoutId);
-        };
-    }
-  }, [
-      // Dependencies for the game state snapshot
-      // We rely on the closure for some large objects (stage) inside getAdvice to avoid constant re-firing
-      // But to be React-correct, we should include them.
-      // However, we actually WANT to debounce this and only fire on significant stable states.
-      // Firing on every 'stage' update (every tick) is too much.
-      // So we trigger primarily on `player.pos.y` (drop) or just keep the timer loop.
-      // To fix the stale closure issue identified by review:
-      // We will disable the linter warning or trust the timer to pick up the *latest* state ref
-      // BUT `useEffect` closures capture state at effect creation.
-      // So we MUST include them or use refs for state.
-      // Let's go with including them but creating a stable debouncer.
-      // Actually, simpler fix: just depend on a 'tick' counter or player.pos.y for "moves".
-      player.pos.y, 
-      gameOver, 
-      player.collided,
-      // Include others to avoid stale closure if we want 100% correctness
-      // But listing `stage` causes re-fire on every ms tick if not careful.
-      // Compromise: The code below effectively restarts the 3s timer on every drop.
-      // That means if you drop fast, AI never fires.
-      // Better: Use a separate interval for AI that samples the REF of the state.
-  ]); 
-
-  // Ref-based state access for independent polling loop (Advanced fix)
+  // Ref-based state access for independent polling loop
   const gameStateRef = useRef({ stage, player, level, score });
   useEffect(() => {
       gameStateRef.current = { stage, player, level, score };
   }, [stage, player, level, score]);
 
+  // Robust AI Coach Polling Loop
   useEffect(() => {
       if (gameOver) return;
       
@@ -330,11 +255,11 @@ const Tetris = () => {
                   stateSummary, 
                   { level: 'intermediate' }, 
                   address, 
-                  { signal: controller.signal, timeoutMs: 4000 }
+                  { signal: controller.signal, timeoutMs: 4000, retries: 2 }
               );
               setAdvice(newAdvice);
           } catch {
-              // ignore
+              // ignore errors to keep game smooth
           } finally {
               setLoadingAdvice(false);
           }
@@ -344,7 +269,7 @@ const Tetris = () => {
           clearInterval(aiInterval);
           controller.abort();
       };
-  }, [gameOver, address]); // Removed volatile deps to prevent timer reset
+  }, [gameOver, address]);
 
   return (
     <div className="flex gap-8 w-full max-w-4xl mx-auto outline-none" role="button" tabIndex={0} onKeyDown={(e) => move(e)} onKeyUp={keyUp}>
