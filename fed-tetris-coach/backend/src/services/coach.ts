@@ -14,19 +14,78 @@ interface TetrisState {
   // ... other fields
 }
 
+const BOARD_WIDTH = 10;
+
+function normalizePiece(piece: any): string {
+  if (!piece) return 'none';
+  const type = (piece.type ?? piece.name ?? piece.id ?? 'unknown').toString();
+  // Rotation matters for strategy, but minor variations in state (e.g. spawn frame) shouldn't break cache
+  const rot = (piece.rotation ?? piece.state ?? piece.dir ?? 0).toString();
+  return `${type}:${rot}`;
+}
+
+function bucket(value: number, size: number): number {
+  return Math.floor((value || 0) / size);
+}
+
+function bucketArray(values: number[], size: number): number[] {
+  return values.map(v => bucket(v, size));
+}
+
+function extractBoardFeatures(board: number[][]) {
+  const rows = board.length;
+  const cols = board[0]?.length ?? BOARD_WIDTH;
+  const heights = new Array(cols).fill(0);
+  let holes = 0;
+
+  for (let c = 0; c < cols; c++) {
+    let seenBlock = false;
+    for (let r = 0; r < rows; r++) {
+      const cell = board[r]?.[c] ?? 0;
+      if (cell) {
+        if (!seenBlock) {
+          heights[c] = rows - r; // height from bottom
+          seenBlock = true;
+        }
+      } else if (seenBlock) {
+        holes++; // empty cell under the surface
+      }
+    }
+  }
+
+  let bumpiness = 0;
+  for (let c = 0; c < cols - 1; c++) {
+    bumpiness += Math.abs(heights[c] - heights[c + 1]);
+  }
+
+  const maxHeight = Math.max(...heights, 0);
+  const avgHeight = heights.reduce((a, b) => a + b, 0) / (cols || 1);
+
+  return { heights, holes, bumpiness, maxHeight, avgHeight };
+}
+
 function fingerprint(state: TetrisState): string {
-  // Simplify state for caching (fuzzy matching could be added here)
-  // Taking top 10 rows of board, current piece, etc.
-  // If state.board is missing or wrong shape, handle gracefully
   const board = state.board || [];
-  const compact = {
-    boardTop: board.slice(0, 10), 
-    piece: state.currentPiece,
-    next: (state.nextQueue || []).slice(0, 1),
-    hold: state.holdPiece,
-    lvl: Math.floor((state.level || 0) / 3) // bucket levels
+  const { heights, holes, bumpiness, maxHeight, avgHeight } = extractBoardFeatures(board);
+
+  const signature = {
+    // Coarse features for fuzzy matching
+    heights: bucketArray(heights, 2),       // Match shapes that are within 2 rows of height difference
+    holes: bucket(holes, 3),                // Group by hole count (0-2, 3-5, etc)
+    bump: bucket(bumpiness, 4),             // General surface roughness
+    max: bucket(maxHeight, 2),              // Max height bucket
+    avg: bucket(avgHeight, 2),              // Avg height bucket
+    
+    // Piece context
+    piece: normalizePiece(state.currentPiece),
+    next: normalizePiece((state.nextQueue ?? [])[0]),
+    hold: normalizePiece(state.holdPiece),
+    
+    // Game phase context
+    lvl: bucket(state.level ?? 0, 5)        // Strategy shifts every ~5 levels
   };
-  return crypto.createHash('sha256').update(JSON.stringify(compact)).digest('hex');
+
+  return crypto.createHash('sha256').update(JSON.stringify(signature)).digest('hex');
 }
 
 export async function getAdvice(
